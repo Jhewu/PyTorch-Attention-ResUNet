@@ -8,7 +8,6 @@ from itertools import cycle
 
 from monai.losses import DiceLoss
 from monai.metrics import DiceMetric
-from monai.transforms import AsDiscrete
 
 import torch
 from torch.amp import GradScaler
@@ -87,17 +86,22 @@ class Trainer:
         self.device = device
         self.data_path = data_path
         self.model_path = model_path
-  
+            
         self.loss = DiceLoss(
-            include_background = False, # might change this later
+            include_background = False, # single class
+            to_one_shot_y = False,      # single class
             sigmoid=True, 
+            soft_label = True,          # should improve convergence    
+            batch = True,               # should improve stability during training
             reduction="mean")
 
-        self.post_pred = AsDiscrete(threshold=0.5)
-        
         self.metric = DiceMetric(
             include_background = False, 
-            reduction="mean"
+            reduction="mean_batch",     
+            get_not_nans = False, 
+            ignore_empty = False, 
+            num_classes = 2,            # 2 stands for [0, 1], technically single class
+            return_with_label = False
         )
 
         self.image_size = image_size
@@ -282,7 +286,7 @@ class Trainer:
 
                     # Update metrics
                     pred_sigmoid = torch.nn.functional.sigmoid(pred)
-                    pred_binary = self.post_pred(pred_sigmoid)
+                    pred_binary  = (pred_sigmoid > 0.5).float()
                     self.metric(pred_binary, mask)
 
             else:
@@ -302,11 +306,11 @@ class Trainer:
 
                     # Update metrics
                     pred_sigmoid = torch.nn.functional.sigmoid(pred)
-                    pred_binary = self.post_pred(pred_simoid)
+                    pred_binary  = (pred_sigmoid > 0.5).float()
                     self.metric(pred_binary, mask)
                     
             end_time = time.time()
-            train_loss = train_running_loss / (idx + 1)# len(train_dataloader)
+            train_loss = train_running_loss / (idx + 1) 
             train_dice_metric = self.metric.aggregate().item()
             self.metric.reset() # <- Reset again
             
@@ -324,7 +328,7 @@ class Trainer:
                     val_running_loss += loss.item()
 
                     pred_sigmoid = torch.nn.functional.sigmoid(pred)
-                    pred_binary = self.post_pred(pred_sigmoid) 
+                    pred_binary  = (pred_sigmoid > 0.5).float()
                     self.metric(pred_binary, mask)
 
                 val_loss = val_running_loss / (idx + 1) # len(val_dataloader)
@@ -392,8 +396,8 @@ if __name__ == "__main__":
                     lr = 1e-4,
 
                     early_stopping = True,
-                    early_stopping_start = 10,
-                    patience = 10, 
+                    early_stopping_start = 25,
+                    patience = 5, 
                     device = "cuda"
                     )
                             
