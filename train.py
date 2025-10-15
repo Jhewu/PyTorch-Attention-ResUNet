@@ -88,19 +88,19 @@ class Trainer:
         self.model_path = model_path
             
         self.loss = DiceLoss(
-            include_background = False, # single class
-            to_one_shot_y = False,      # single class
+            include_background = True,  # single class
+            to_onehot_y = False,        # single class (target already binary)
             sigmoid=True, 
-            soft_label = True,          # should improve convergence    
+            soft_label = True,          # should improve convergence (for soft targets)
             batch = True,               # should improve stability during training
             reduction="mean")
 
         self.metric = DiceMetric(
-            include_background = False, 
+            include_background = False, # exclude background when reporting Dice (standard practice)
             reduction="mean_batch",     
             get_not_nans = False, 
             ignore_empty = False, 
-            num_classes = 2,            # 2 stands for [0, 1], technically single class
+            num_classes = None,         # infers from data (will be 1 channel)
             return_with_label = False
         )
 
