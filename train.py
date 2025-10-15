@@ -91,7 +91,6 @@ class Trainer:
             include_background = True,  # single class
             to_onehot_y = False,        # single class (target already binary)
             sigmoid=True, 
-            soft_label = True,          # should improve convergence (for soft targets)
             batch = True,               # should improve stability during training
             reduction="mean")
 
