@@ -1,8 +1,52 @@
+import torch
 import torch.nn as nn
-from modules.unet_parts import DoubleConv, DownSample, UpSample
+
+class DoubleConv(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        """
+        Standard UNet DoubleConvBlocks with ReLU activations
+        """
+        super().__init__()
+        self.conv_op = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv_op(x)
+
+class DownSample(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        """
+        DoubleConv followed by MaxPool2d for Downsampling
+        """
+        super().__init__()
+        self.conv = DoubleConv(in_channels, out_channels)
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        down = self.conv(x)
+        p = self.pool(down)
+        return down, p
+
+class UpSample(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        """
+        UpSample with ConvTranspose2d followed by Concatenation and DoubleConv
+        """
+        super().__init__()
+        self.up = nn.ConvTranspose2d(in_channels, in_channels//2, kernel_size=2, stride=2)
+        self.conv = DoubleConv(in_channels, out_channels)
+
+    def forward(self, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+       x1 = self.up(x1)
+       x = torch.cat([x1, x2], 1)
+       return self.conv(x)
 
 class UNet(nn.Module):
-    def __init__(self, in_channels, widths, num_classes):
+    def __init__(self, in_channels: int, widths: list[int], num_classes: int):
         super().__init__()
 
         self.input = DownSample(in_channels, widths[0])
@@ -38,4 +82,10 @@ class UNet(nn.Module):
             up_output = up_block(up_output, skip_connection)
 
         out = self.output(up_output)
+        return out
+    
+    def predict(self, x: torch.Tensor, binarize: bool = True) -> torch.Tensor: 
+        out = self.forward(x)
+        if binarize:
+            out = (torch.sigmoid(out) > 0.5).float()  
         return out
