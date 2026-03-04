@@ -1,6 +1,8 @@
 # External
 import torch
+import pandas as pd
 import torch.nn as nn
+import matplotlib.pyplot as plt
 from torch.optim import Optimizer
 from torch.utils.data import Dataset, DataLoader
 
@@ -8,9 +10,12 @@ from tqdm import tqdm
 
 # Internal
 import os
+import time
 import copy
+import shutil 
 import contextlib
-from typing import Any, Tuple
+from itertools import cycle
+from typing import Any, Tuple, List
 from abc import ABC, abstractmethod
 
 # ─────────────────────────────────────────────
@@ -123,6 +128,7 @@ class BaseTrainer:
         metrics:  BaseMetrics,
         dataloader:  BaseDataLoader,
         params:   dict,          # raw yaml.safe_load() output
+        param_dir: str, 
     ):
         # ── resolve device ────────────────────
         self.device  = params.get("device", "cuda" if torch.cuda.is_available() else "cpu")
@@ -142,7 +148,6 @@ class BaseTrainer:
         # ── training hyperparams ──────────────
         self.epochs          = t_cfg.get("epochs",          10)
         self.gradient_clip   = t_cfg.get("gradient_clip",   0.0)
-        self.checkpoint_path = t_cfg.get("checkpoint_path", None)
         self.verbose         = t_cfg.get("verbose",         True)
         self.mixed_precision = t_cfg.get("mixed_precision", True)
 
@@ -194,9 +199,25 @@ class BaseTrainer:
             else None
         )
 
+        # ── checkpoint path ───────────────────
+        self.checkpoint_dir = self.build_checkpoint_path()
+        self._create_dir(self.checkpoint_dir)
+        shutil.copy(param_dir,
+             os.path.join(self.checkpoint_dir, param_dir))
+
     # ── core loops ──────────────────────────── 
 
-    def create_dir(self, directory: str):
+    def _get_current_time(self) -> str:
+        """
+        Get current time in YMD | HMS format
+        Used for creating non-conflicting result dirs
+        Returns
+            (str) Time in Ymd | HMs format
+        """
+        current_time = time.localtime()
+        return time.strftime("%Y_%m_%d_%H_%M_%S", current_time)
+
+    def _create_dir(self, directory: str):
         """
         Creates the given directory if it does not exists
         Args:
@@ -226,20 +247,8 @@ class BaseTrainer:
             return batch["inputs"], batch["targets"]
         raise ValueError("Override _unpack() to handle your DataLoader format.")
 
-    def _train_step(self, inputs, targets) -> torch.Tensor:
-        """Returns loss for one batch. Override for custom forward logic."""
-        preds = self.model(inputs)
-        loss = self.loss_fn(preds, targets)
-        return preds, loss
-
-    def _set_model_to_train(self): 
-        """
-        For overriding in case of models with different train/eval modes for submodules (e.g. BatchNorm, Dropout).
-        """
-        self.model.train()
-
     def _train_epoch(self, loader: DataLoader) -> float:
-        self._set_model_to_train()
+        self.set_model_to_train()
         total_loss, n = 0.0, 0
         for raw_batch in tqdm(loader):
             batch          = self._move(raw_batch)
@@ -247,7 +256,7 @@ class BaseTrainer:
 
             self.optimizer.zero_grad()
             with self._autocast_ctx:        
-                preds, loss = self._train_step(inputs, targets)
+                preds, loss = self.train_step(inputs, targets)
 
             if torch.isnan(loss):
                 print("NaN loss detected!")
@@ -288,7 +297,7 @@ class BaseTrainer:
             inputs, targets = self._unpack(batch)
 
             with self._autocast_ctx:
-                preds, loss = self._train_step(inputs, targets)
+                preds, loss = self.train_step(inputs, targets)
 
             self.metrics.update(preds, targets)
 
@@ -298,6 +307,21 @@ class BaseTrainer:
         return total_loss / max(n, 1), self.metrics.compute()
 
     # ── public API ────────────────────────────
+
+    def build_checkpoint_path(self): 
+        return os.path.join("checkpoints", self._get_current_time())
+
+    def set_model_to_train(self): 
+        """
+        For overriding in case of models with different train/eval modes for submodules (e.g. BatchNorm, Dropout).
+        """
+        self.model.train()
+
+    def train_step(self, inputs, targets) -> torch.Tensor:
+        """Returns loss for one batch. Override for custom forward logic."""
+        preds = self.model(inputs)
+        loss = self.loss_fn(preds, targets)
+        return preds, loss
 
     def train(self):
         train_loader, val_loader = self.dataloader.get_dataloader("train")
@@ -327,8 +351,8 @@ class BaseTrainer:
             if improved:
                 self._best_es_metric = es_value
                 self._best_weights   = copy.deepcopy(self.model.state_dict())
-                if self.checkpoint_path:
-                    torch.save(self._best_weights, self.checkpoint_path)
+                if self.checkpoint_dir:
+                    torch.save(self._best_weights, self.checkpoint_dir + "/best.pth")
 
             self.history["train_loss"].append(train_loss)
             self.history["val_loss"].append(val_loss)
@@ -352,9 +376,118 @@ class BaseTrainer:
                                   f"(no improvement for {self.early_stopping_patience} epochs)")
                         break
 
-        # restore best weights at end of training
-        if self._best_weights is not None:
-            self.model.load_state_dict(self._best_weights)
+            # save history to csv
+            self.save_csv(history = self.history, save_path=f"{self.checkpoint_dir}/history.csv")
+
+        # restore last weights at end of training
+        if self.checkpoint_dir:
+            torch.save(self._best_weights, self.checkpoint_dir + "/last.pth")
+        
+        # plot history
+        self.save_history_plot(save_path=self.checkpoint_dir,
+            history=self._flatten_history(self.history), filename="plot_all.png")
+        
+    def _flatten_history(self, history: dict) -> dict:
+        history_flat = {
+            "train_loss": history["train_loss"],
+            "val_loss": history["val_loss"],            
+        }
+
+        for metrics in history["val_metrics"]:
+            for k, v in metrics.items():
+                if k not in history_flat:
+                    history_flat[k] = []
+                history_flat[k].append(v)
+        return history_flat
+    
+    def save_csv(self, history: dict, save_path: str) -> None: 
+        history_flat = self._flatten_history(history)
+        pd.DataFrame(history_flat).to_csv(
+        os.path.join(save_path), index=False)
+
+    # def save_history_plot(self, save_path: str, history: dict,
+    #                      filename: str = "plot.png") -> None:
+    #     """
+    #     Plot every metric stored in 'self.history'.
+    #     The method automatically discovers keys, assigns a colour, and
+    #     draws a legend entry for each.
+
+    #     Parameters
+    #         save_path (str): Directory to which the plot PNG will be written.
+    #         filename (str):  File name for the saved image (Default "plot.png")
+    #     """
+
+    #     # Create output dir if it does not exist
+    #     os.makedirs(save_path, exist_ok=True)
+
+    #     plt.figure(figsize=(10, 6))
+
+    #     # Pick a colour palette u2013 reuse if more metrics than colours
+    #     colour_cycle = cycle(
+    #         ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+    #          "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+    #          "#bcbd22", "#17becf"]
+    #     )
+
+    #     # Sort keys to keep a deterministic order
+    #     for key in sorted(history.keys()):
+    #         values: List[float] = history[key]
+    #         # Use the key itself as the label (nice formatting optional)
+    #         label = key.replace("_", " ").title()
+    #         plt.plot(values, label=label, color=next(colour_cycle))
+
+    #     plt.title("Training History")
+    #     plt.xlabel("Epoch")
+    #     plt.ylabel("Value")
+    #     plt.legend()
+    #     plt.grid(True)
+
+    #     out_file = os.path.join(save_path, filename)
+    #     plt.savefig(out_file)
+    #     plt.show()
+
+    def save_history_plot(self, save_path: str, history: dict,
+                         filename: str = "plot.png") -> None:
+        """
+        Plot every metric stored in 'self.history'.
+        Uses dual y-axes to handle vastly different scales (e.g., HD95).
+        """
+        os.makedirs(save_path, exist_ok=True)
+
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        ax2 = ax1.twinx()
+
+        colour_cycle = cycle(
+            ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+             "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+             "#bcbd22", "#17becf"]
+        )
+
+        # Plot loss metrics on left axis, HD95 on right
+        for key in sorted(history.keys()):
+            values = history[key]
+            label = key.replace("_", " ").title()
+            color = next(colour_cycle)
+            
+            if "hd95" in key.lower():
+                ax2.plot(values, label=label, color=color, linestyle="--")
+            else:
+                ax1.plot(values, label=label, color=color)
+
+        ax1.set_xlabel("Epoch")
+        ax1.set_ylabel("Loss / Metrics")
+        ax2.set_ylabel("HD95")
+        ax1.grid(True)
+        
+        # Combine legends from both axes
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left")
+
+        plt.title("Training History")
+        out_file = os.path.join(save_path, filename)
+        plt.savefig(out_file)
+        plt.show()
 
     def evaluate(self, split: str = "test") -> tuple[float, dict]:
         train_loader, val_loader = self.dataloader.get_dataloader(split)
