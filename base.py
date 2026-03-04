@@ -18,6 +18,20 @@ from itertools import cycle
 from typing import Any, Tuple, List
 from abc import ABC, abstractmethod
 
+OPTIMIZER_REGISTRY = {
+    "adam":     torch.optim.Adam,
+    "adamw":    torch.optim.AdamW,
+    "sgd":      torch.optim.SGD,
+    "rmsprop":  torch.optim.RMSprop,
+}
+
+SCHEDULER_REGISTRY = {
+    "step":       torch.optim.lr_scheduler.StepLR,
+    "cosine":     torch.optim.lr_scheduler.CosineAnnealingLR,
+    "exponential":torch.optim.lr_scheduler.ExponentialLR,
+    "plateau":    torch.optim.lr_scheduler.ReduceLROnPlateau,
+}
+
 # ─────────────────────────────────────────────
 # 1. BASE CONTRACTS  (Abstract interfaces)
 # ─────────────────────────────────────────────
@@ -77,20 +91,6 @@ class BaseDataLoader(DataLoader, ABC):
         """Default returns two DataLoaders: train and val/test. Override if you want more splits."""
         ...
 
-OPTIMIZER_REGISTRY = {
-    "adam":     torch.optim.Adam,
-    "adamw":    torch.optim.AdamW,
-    "sgd":      torch.optim.SGD,
-    "rmsprop":  torch.optim.RMSprop,
-}
-
-SCHEDULER_REGISTRY = {
-    "step":       torch.optim.lr_scheduler.StepLR,
-    "cosine":     torch.optim.lr_scheduler.CosineAnnealingLR,
-    "exponential":torch.optim.lr_scheduler.ExponentialLR,
-    "plateau":    torch.optim.lr_scheduler.ReduceLROnPlateau,
-}
-
 class BaseTrainer:
     """
     Generic trainer driven by a YAML config dict, e.g.:
@@ -98,29 +98,13 @@ class BaseTrainer:
         with open(PARAM_DIR, "r") as f:
             params = yaml.safe_load(f)
 
-        trainer = Trainer(model, loss_fn, metrics, dataset, params)
-
-    Expected YAML structure (all keys optional — defaults shown):
-    ┌─────────────────────────────────────────┐
-    │ training:                               │
-    │   epochs: 10                            │
-    │   gradient_clip: 0.0                    │
-    │   checkpoint_path: null                 │
-    │   verbose: true                         │
-    │                                         │
-    │ optimizer:                              │
-    │   name: adam          # see registry    │
-    │   learning_rate: 1e-3                   │
-    │   weight_decay: 0.0                     │
-    │                                         │
-    │ scheduler:            # optional block  │
-    │   name: cosine        # see registry    │
-    │   kwargs:             # passed as-is    │
-    │     T_max: 10                           │
-    │                                         │
-    └─────────────────────────────────────────┘
+    trainer = SegmentationTrainer(model=model, 
+        loss_fn=loss, 
+        metrics=metrics, 
+        dataloader=dataloader, 
+        params=params['trainer'], 
+        param_dir=PARAM_DIR)
     """
-
     def __init__(
         self,
         model:    BaseModel,
@@ -130,7 +114,7 @@ class BaseTrainer:
         params:   dict,          # raw yaml.safe_load() output
         param_dir: str, 
     ):
-        # ── resolve device ────────────────────
+        # resolve device
         self.device  = params.get("device", "cuda" if torch.cuda.is_available() else "cpu")
 
         # ── model & components ────────────────
@@ -146,13 +130,15 @@ class BaseTrainer:
         e_cfg  = params.get("early_stopping", {})
 
         # ── training hyperparams ──────────────
-        self.epochs          = t_cfg.get("epochs",          10)
-        self.gradient_clip   = t_cfg.get("gradient_clip",   0.0)
-        self.verbose         = t_cfg.get("verbose",         True)
-        self.mixed_precision = t_cfg.get("mixed_precision", True)
+        self.epochs          =     t_cfg.get("epochs",          10)
+        self.mixed_precision =     t_cfg.get("is_mixed_precision", True)
+        self.is_load_and_train =   t_cfg.get("is_load_and_train", False)
+        self.load_and_train_path = t_cfg.get("load_and_train_path", None)
+        self.gradient_clip   =     t_cfg.get("gradient_clip",   0.0)
+        self.verbose         =     t_cfg.get("verbose",         True)
 
         # ── optimizer (looked up from registry) ──
-        opt_name  = o_cfg.get("name", "adam").lower()
+        opt_name  = o_cfg.get("name", "adamW").lower()
         opt_cls   = OPTIMIZER_REGISTRY.get(opt_name)
         if opt_cls is None:
             raise ValueError(f"Unknown optimizer '{opt_name}'. "
@@ -174,14 +160,15 @@ class BaseTrainer:
             self.scheduler = sch_cls(self.optimizer, **s_cfg.get("kwargs") or {})
         
         # ── early stopping ────────────────────
-        self.early_stopping_enabled = e_cfg.get("enabled", True)
-        self.early_stopping_patience = e_cfg.get("patience", 10)
-        self.early_stopping_delta = e_cfg.get("delta", 1e-3)
-        self.early_stopping_metric = e_cfg.get("metric", "val_loss")
-        self.early_stopping_mode = e_cfg.get("mode", "min")
+        self.early_stopping_enabled     = e_cfg.get("enabled", True)
         self.early_stopping_start_epoch = e_cfg.get("start_epoch", 0)
+        self.early_stopping_patience    = e_cfg.get("patience", 10)
+        self.early_stopping_metric      = e_cfg.get("metric", "val_loss")
+        self.early_stopping_mode        = e_cfg.get("mode", "min")
+        self.early_stopping_delta       = e_cfg.get("delta", 1e-3)
 
-        self.history: dict[str, list] = {"train_loss": [], "val_loss": [], "val_metrics": []}
+        # ── internal state ─────────────────────
+        self._history: dict[str, list] = {"train_loss": [], "val_loss": [], "val_metrics": []}
         self._best_weights = None
 
         self._early_stopping_counter = 0
@@ -199,13 +186,16 @@ class BaseTrainer:
             else None
         )
 
-        # ── checkpoint path ───────────────────
         self.checkpoint_dir = self.build_checkpoint_path()
         self._create_dir(self.checkpoint_dir)
         shutil.copy(param_dir,
              os.path.join(self.checkpoint_dir, param_dir))
+    
+        if self.is_load_and_train and self.load_and_train_path is not None: 
+            checkpoint = torch.load(self.load_and_train_path, weights_only=True)
+            self.model.load_state_dict(checkpoint)
 
-    # ── core loops ──────────────────────────── 
+    # ── private utils ───────────────────────────
 
     def _get_current_time(self) -> str:
         """
@@ -225,7 +215,9 @@ class BaseTrainer:
         """
         if not os.path.exists(directory):
             os.makedirs(directory)
-    
+
+    # ── core loops ──────────────────────────── 
+
     def _move(self, batch):
         """Recursively move tensors in batch to device."""
         if isinstance(batch, torch.Tensor):
@@ -255,7 +247,7 @@ class BaseTrainer:
             inputs, targets = self._unpack(batch)
 
             self.optimizer.zero_grad()
-            with self._autocast_ctx:        
+            with self._autocast_ctx: # mixed precision  
                 preds, loss = self.train_step(inputs, targets)
 
             if torch.isnan(loss):
@@ -269,7 +261,7 @@ class BaseTrainer:
                 self._scaler.scale(loss).backward()
                 self._scaler.unscale_(self.optimizer)
 
-                if self.gradient_clip > 0:
+                if self.gradient_clip is not None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
 
                 self._scaler.step(self.optimizer)
@@ -277,7 +269,7 @@ class BaseTrainer:
             else: 
                 loss.backward()
 
-                if self.gradient_clip > 0:
+                if self.gradient_clip is not None:
                     nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
 
                 self.optimizer.step()
@@ -306,7 +298,7 @@ class BaseTrainer:
 
         return total_loss / max(n, 1), self.metrics.compute()
 
-    # ── public API ────────────────────────────
+    # ── public utils ──────────────────────────
 
     def build_checkpoint_path(self): 
         return os.path.join("checkpoints", self._get_current_time())
@@ -316,77 +308,7 @@ class BaseTrainer:
         For overriding in case of models with different train/eval modes for submodules (e.g. BatchNorm, Dropout).
         """
         self.model.train()
-
-    def train_step(self, inputs, targets) -> torch.Tensor:
-        """Returns loss for one batch. Override for custom forward logic."""
-        preds = self.model(inputs)
-        loss = self.loss_fn(preds, targets)
-        return preds, loss
-
-    def train(self):
-        train_loader, val_loader = self.dataloader.get_dataloader("train")
-
-        for epoch in range(1, self.epochs + 1):
-            train_loss            = self._train_epoch(train_loader)
-            val_loss, val_metrics = self._eval_epoch(val_loader)
-
-            if self.scheduler:
-                self.scheduler.step()
-
-            # ── resolve tracked metric (shared by checkpointing + early stopping) ──
-            if self.early_stopping_metric == "val_loss":
-                es_value = val_loss
-            else:
-                es_value = val_metrics.get(self.early_stopping_metric)
-                if es_value is None:
-                    raise ValueError(f"Metric '{self.early_stopping_metric}' not found in val_metrics")
-
-            improved = (
-                es_value < self._best_es_metric - self.early_stopping_delta
-                if self.early_stopping_mode == "min"
-                else es_value > self._best_es_metric + self.early_stopping_delta
-            )
-
-            # ── checkpoint best model ──────────
-            if improved:
-                self._best_es_metric = es_value
-                self._best_weights   = copy.deepcopy(self.model.state_dict())
-                if self.checkpoint_dir:
-                    torch.save(self._best_weights, self.checkpoint_dir + "/best.pth")
-
-            self.history["train_loss"].append(train_loss)
-            self.history["val_loss"].append(val_loss)
-            self.history["val_metrics"].append(val_metrics)
-
-            if self.verbose:
-                metrics_str = "  ".join(f"{k}: {v:.4f}" for k, v in val_metrics.items())
-                print(f"[{epoch:03d}/{self.epochs}]  "
-                      f"train_loss: {train_loss:.4f}  "
-                      f"val_loss: {val_loss:.4f}  {metrics_str}")
-
-            # ── early stopping counter ────────────
-            if self.early_stopping_enabled and epoch >= self.early_stopping_start_epoch:
-                if improved:
-                    self._early_stopping_counter = 0
-                else:
-                    self._early_stopping_counter += 1
-                    if self._early_stopping_counter >= self.early_stopping_patience:
-                        if self.verbose:
-                            print(f"Early stopping triggered at epoch {epoch} "
-                                  f"(no improvement for {self.early_stopping_patience} epochs)")
-                        break
-
-            # save history to csv
-            self.save_csv(history = self.history, save_path=f"{self.checkpoint_dir}/history.csv")
-
-        # restore last weights at end of training
-        if self.checkpoint_dir:
-            torch.save(self._best_weights, self.checkpoint_dir + "/last.pth")
-        
-        # plot history
-        self.save_history_plot(save_path=self.checkpoint_dir,
-            history=self._flatten_history(self.history), filename="plot_all.png")
-        
+    
     def _flatten_history(self, history: dict) -> dict:
         history_flat = {
             "train_loss": history["train_loss"],
@@ -401,55 +323,14 @@ class BaseTrainer:
         return history_flat
     
     def save_csv(self, history: dict, save_path: str) -> None: 
-        history_flat = self._flatten_history(history)
+        history_flat: dict = self._flatten_history(history)
         pd.DataFrame(history_flat).to_csv(
         os.path.join(save_path), index=False)
-
-    # def save_history_plot(self, save_path: str, history: dict,
-    #                      filename: str = "plot.png") -> None:
-    #     """
-    #     Plot every metric stored in 'self.history'.
-    #     The method automatically discovers keys, assigns a colour, and
-    #     draws a legend entry for each.
-
-    #     Parameters
-    #         save_path (str): Directory to which the plot PNG will be written.
-    #         filename (str):  File name for the saved image (Default "plot.png")
-    #     """
-
-    #     # Create output dir if it does not exist
-    #     os.makedirs(save_path, exist_ok=True)
-
-    #     plt.figure(figsize=(10, 6))
-
-    #     # Pick a colour palette u2013 reuse if more metrics than colours
-    #     colour_cycle = cycle(
-    #         ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
-    #          "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
-    #          "#bcbd22", "#17becf"]
-    #     )
-
-    #     # Sort keys to keep a deterministic order
-    #     for key in sorted(history.keys()):
-    #         values: List[float] = history[key]
-    #         # Use the key itself as the label (nice formatting optional)
-    #         label = key.replace("_", " ").title()
-    #         plt.plot(values, label=label, color=next(colour_cycle))
-
-    #     plt.title("Training History")
-    #     plt.xlabel("Epoch")
-    #     plt.ylabel("Value")
-    #     plt.legend()
-    #     plt.grid(True)
-
-    #     out_file = os.path.join(save_path, filename)
-    #     plt.savefig(out_file)
-    #     plt.show()
 
     def save_history_plot(self, save_path: str, history: dict,
                          filename: str = "plot.png") -> None:
         """
-        Plot every metric stored in 'self.history'.
+        Plot every metric stored in 'self._history'.
         Uses dual y-axes to handle vastly different scales (e.g., HD95).
         """
         os.makedirs(save_path, exist_ok=True)
@@ -487,7 +368,82 @@ class BaseTrainer:
         plt.title("Training History")
         out_file = os.path.join(save_path, filename)
         plt.savefig(out_file)
-        plt.show()
+        plt.close(fig)
+        # plt.show()
+
+    # ── public API ────────────────────────────
+
+    def train_step(self, inputs, targets) -> torch.Tensor:
+        """Returns loss for one batch. Override for custom forward logic."""
+        preds = self.model(inputs)
+        loss = self.loss_fn(preds, targets)
+        return preds, loss
+
+    def train(self):
+        train_loader, val_loader = self.dataloader.get_dataloader("train")
+
+        for epoch in range(1, self.epochs + 1):
+            train_loss            = self._train_epoch(train_loader)
+            val_loss, val_metrics = self._eval_epoch(val_loader)
+
+            if self.scheduler:
+                self.scheduler.step()
+
+            # ── resolve tracked metric (shared by checkpointing + early stopping) ──
+            if self.early_stopping_metric == "val_loss":
+                es_value = val_loss
+            else:
+                es_value = val_metrics.get(self.early_stopping_metric)
+                if es_value is None:
+                    raise ValueError(f"Metric '{self.early_stopping_metric}' not found in val_metrics")
+
+            improved = (
+                es_value < self._best_es_metric - self.early_stopping_delta
+                if self.early_stopping_mode == "min"
+                else es_value > self._best_es_metric + self.early_stopping_delta
+            )
+
+            # ── checkpoint best model ─────────────
+            if improved:
+                self._best_es_metric = es_value
+                self._best_weights   = copy.deepcopy(self.model.state_dict())
+                if self.checkpoint_dir:
+                    torch.save(self._best_weights, self.checkpoint_dir + "/best.pth")
+
+            # ── update history ─────────────────────
+            self._history["train_loss"].append(train_loss)
+            self._history["val_loss"].append(val_loss)
+            self._history["val_metrics"].append(val_metrics)
+
+            #── print training progress ────────────
+            if self.verbose:
+                metrics_str = "  ".join(f"{k}: {v:.4f}" for k, v in val_metrics.items())
+                print(f"[{epoch:03d}/{self.epochs}]  "
+                      f"train_loss: {train_loss:.4f}  "
+                      f"val_loss: {val_loss:.4f}  {metrics_str}")
+
+            # ── early stopping counter ────────────
+            if self.early_stopping_enabled and epoch >= self.early_stopping_start_epoch:
+                if improved:
+                    self._early_stopping_counter = 0
+                else:
+                    self._early_stopping_counter += 1
+                    if self._early_stopping_counter >= self.early_stopping_patience:
+                        if self.verbose:
+                            print(f"Early stopping triggered at epoch {epoch} "
+                                  f"(no improvement for {self.early_stopping_patience} epochs)")
+                        break
+
+            # ── save history to csv ───────────────
+            self.save_csv(history = self._history, save_path=f"{self.checkpoint_dir}/history.csv")
+
+        # ── save last model weights ───────────────
+        if self.checkpoint_dir:
+            torch.save(self._best_weights, self.checkpoint_dir + "/last.pth")
+        
+        # ── save history as plot ──────────────────
+        self.save_history_plot(save_path=self.checkpoint_dir,
+            history=self._flatten_history(self._history), filename="plot_all.png")
 
     def evaluate(self, split: str = "test") -> tuple[float, dict]:
         train_loader, val_loader = self.dataloader.get_dataloader(split)
@@ -575,6 +531,7 @@ class SimpleTabularDataset(BaseDataset):
 # ─────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # TODO: Create a working example
     pass
     # torch.manual_seed(42)
 
