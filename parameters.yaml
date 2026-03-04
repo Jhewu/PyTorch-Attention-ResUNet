@@ -29,7 +29,7 @@ trainer:
     is_load_and_train: false
     load_and_train_path: null
 
-    gradient_clip: 0.0 
+    gradient_clip: 1.0 
     verbose: true         
 
   early_stopping: 

@@ -134,7 +134,7 @@ class BaseTrainer:
         self.mixed_precision =     t_cfg.get("is_mixed_precision", True)
         self.is_load_and_train =   t_cfg.get("is_load_and_train", False)
         self.load_and_train_path = t_cfg.get("load_and_train_path", None)
-        self.gradient_clip   =     t_cfg.get("gradient_clip",   0.0)
+        self.gradient_clip   =     t_cfg.get("gradient_clip",   1.0)
         self.verbose         =     t_cfg.get("verbose",         True)
 
         # ── optimizer (looked up from registry) ──
@@ -189,7 +189,7 @@ class BaseTrainer:
         self.checkpoint_dir = self.build_checkpoint_path()
         self._create_dir(self.checkpoint_dir)
         shutil.copy(param_dir,
-             os.path.join(self.checkpoint_dir, param_dir))
+             os.path.join(self.checkpoint_dir, os.path.basename(param_dir)))
     
         if self.is_load_and_train and self.load_and_train_path is not None: 
             checkpoint = torch.load(self.load_and_train_path, weights_only=True)
@@ -261,16 +261,14 @@ class BaseTrainer:
                 self._scaler.scale(loss).backward()
                 self._scaler.unscale_(self.optimizer)
 
-                if self.gradient_clip is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
 
                 self._scaler.step(self.optimizer)
                 self._scaler.update()
             else: 
                 loss.backward()
 
-                if self.gradient_clip is not None:
-                    nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
+                nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip)
 
                 self.optimizer.step()
 
@@ -289,7 +287,7 @@ class BaseTrainer:
             inputs, targets = self._unpack(batch)
 
             with self._autocast_ctx:
-                preds, loss = self.train_step(inputs, targets)
+                preds, loss = self.eval_step(inputs, targets)
 
             self.metrics.update(preds, targets)
 
@@ -311,8 +309,9 @@ class BaseTrainer:
     
     def _flatten_history(self, history: dict) -> dict:
         history_flat = {
-            "train_loss": history["train_loss"],
-            "val_loss": history["val_loss"],            
+            "train_loss": list(history["train_loss"]),
+            "val_loss": list(history["val_loss"]), 
+            # Create copy to avoid mutation of original history if subclassing
         }
 
         for metrics in history["val_metrics"]:
@@ -372,6 +371,8 @@ class BaseTrainer:
         # plt.show()
 
     # ── public API ────────────────────────────
+    def eval_step(self, inputs, targets):
+        return self.train_step(inputs, targets)
 
     def train_step(self, inputs, targets) -> torch.Tensor:
         """Returns loss for one batch. Override for custom forward logic."""
@@ -387,7 +388,10 @@ class BaseTrainer:
             val_loss, val_metrics = self._eval_epoch(val_loader)
 
             if self.scheduler:
-                self.scheduler.step()
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(es_value)
+                else:
+                    self.scheduler.step()
 
             # ── resolve tracked metric (shared by checkpointing + early stopping) ──
             if self.early_stopping_metric == "val_loss":
@@ -439,7 +443,7 @@ class BaseTrainer:
 
         # ── save last model weights ───────────────
         if self.checkpoint_dir:
-            torch.save(self._best_weights, self.checkpoint_dir + "/last.pth")
+            torch.save(self.model.state_dict(), self.checkpoint_dir + "/last.pth")
         
         # ── save history as plot ──────────────────
         self.save_history_plot(save_path=self.checkpoint_dir,

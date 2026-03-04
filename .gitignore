@@ -5,3 +5,4 @@ archive/
 old_runs/
 .vscode/
 checkpoints/*
+3_fold_dataset/
