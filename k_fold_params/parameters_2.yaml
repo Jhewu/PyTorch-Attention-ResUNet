@@ -19,7 +19,7 @@ dataloader:
   num_workers: 10
   use_shuffle: false
   use_persistent_workers: false
-  use_pin_memory: true
+  use_pin_memory: false
 
 trainer: 
   training:    

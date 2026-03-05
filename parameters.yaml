@@ -1,14 +1,15 @@
 model: 
   # TODO: Update for YOLOSegmantic
+  name: "unet"  # unet, tiny_unet, unext
   in_channels: 4
   out_channels: 1
 
 dataloader: 
 
   # Dataset Parameters
-  root_path: "./data/stacked_segmentation_0/"
+  root_path: "3_fold_dataset/stacked_segmentation_0"
   image_dir: "images"
-  mask_dir: "masks"
+  mask_dir: "labels"
   image_size: 160
   use_augmentation: true
   subsample: 1.0
@@ -18,7 +19,7 @@ dataloader:
   num_workers: 10
   use_shuffle: false
   use_persistent_workers: false
-  use_pin_memory: true
+  use_pin_memory: false
 
 trainer: 
   training:    
@@ -35,7 +36,7 @@ trainer:
   early_stopping: 
     enabled: true
     patience: 10
-    delta: 0.001
+    delta: 0.001 # 1e-3
     metric: "dice"
     mode: "max" 
     start_epoch: 50
