@@ -56,10 +56,11 @@ if __name__ == "__main__":
     if args.k is not None:
         K = args.k
     else: K = 3
+
     if args.param_dirs is not None:
         PARAM_DIRS = args.param_dirs
     else: 
-        PARAM_DIRS = ["k_fold_params/parameters_0.yaml", "k_fold_params/parameters_1.yalm", "k_fold_params/parameters_2.yaml"]
+        PARAM_DIRS = ["k_fold_params/parameters_0.yaml", "k_fold_params/parameters_1.yaml", "k_fold_params/parameters_2.yaml"]
 
     run_kfold_cross_validation()
     print(f"\nFinished K-Fold Cross Validation! Check Directory for {K} directories of trained models and results.")

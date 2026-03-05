@@ -1,0 +1,54 @@
+model: 
+  # TODO: Update for YOLOSegmantic
+  name: "unext"  # unet, tiny_unet, unext
+  in_channels: 4
+  out_channels: 1
+
+dataloader: 
+
+  # Dataset Parameters
+  root_path: "3_fold_dataset/stacked_segmentation_2"
+  image_dir: "images"
+  mask_dir: "labels"
+  image_size: 160
+  use_augmentation: true
+  subsample: 1.0
+  
+  # DataLoader Parameters
+  batch_size: 128
+  num_workers: 10
+  use_shuffle: false
+  use_persistent_workers: false
+  use_pin_memory: true
+
+trainer: 
+  training:    
+    # General                           
+    epochs: 75
+    use_mix_precision: true
+
+    is_load_and_train: false
+    load_and_train_path: null
+
+    gradient_clip: 1.0 
+    verbose: true         
+
+  early_stopping: 
+    enabled: true
+    patience: 10
+    delta: 0.001 # 1e-3
+    metric: "dice"
+    mode: "max" 
+    start_epoch: 50
+    
+  optimizer:                          
+    name: adamW           # see registry
+    learning_rate: 0.0001 # 1e-4            
+    weight_decay: 0.0                     
+    
+  scheduler:           # optional block
+    name: cosine        # see registry
+    kwargs:             # passed as-is
+      T_max: 10
+  
+  device: "cuda"
