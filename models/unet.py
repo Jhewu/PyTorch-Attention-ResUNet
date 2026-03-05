@@ -83,9 +83,4 @@ class UNet(nn.Module):
 
         out = self.output(up_output)
         return out 
-    
-    def predict(self, x: torch.Tensor, logits: bool = True) -> torch.Tensor: 
-        out = self.forward(x)
-        if logits:
-            out = (torch.sigmoid(out) > 0.5).float()  
-        return out
+
