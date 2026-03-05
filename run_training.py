@@ -1,7 +1,7 @@
 # Local 
-from modules.unet import UNet
-from modules.tiny_unet import TinyUNet
-from modules.unext import UNext
+from models.unet import UNet
+from models.tiny_unet import TinyUNet
+from models.unext import UNext
 
 from trainer import SegmentationTrainer
 from metrics import SegmentationMetrics
@@ -37,7 +37,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description=des.lstrip(" "), formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument("-p", "--param_dir", type=str, help='directory of YAML parameter configuration file\t[parameters.yaml]')
-    parser.add_argument("-m" ,"--model", type=str, help='options are [unet, tiny_unet, unext]\t[unet]')
     args = parser.parse_args()
 
     ## --- Parse ----------------- ##
@@ -45,30 +44,29 @@ if __name__ == "__main__":
         PARAM_DIR = args.param_dir
     else: 
         PARAM_DIR = "parameters.yaml"
-    if args.model is not None: 
-        MODEL = args.model
-    else:
-        MODEL = "unet"
 
     ## --- Load Parameters ----------------- ##
     with open(f"{PARAM_DIR}", "r") as f:
         params = yaml.safe_load(f)
 
+    model_cfg = params['model']
+    MODEL = model_cfg['name'].lower()
     if MODEL == "unet":
         model = UNet(
-            in_channels = params['model']['in_channels'],
-            num_classes = params['model']['out_channels'],
+            in_channels = model_cfg['in_channels'],
+            num_classes = model_cfg['out_channels'],
             widths = [64, 128, 256, 512], 
-            ).to("cuda")
+        ).to("cuda")
         
     elif MODEL == "tiny_unet":
         model = TinyUNet(
-            in_channels = params['model']['in_channels'], 
-            num_classes = params['model']['out_channels']).to("cuda")   
+            in_channels = model_cfg['in_channels'], 
+            num_classes = model_cfg['out_channels']).to("cuda")   
+        
     elif MODEL == "unext": 
         model = UNext(
-            input_channels = params['model']['in_channels'],
-            num_classes = params['model']['out_channels']).to("cuda")
+            input_channels = model_cfg['in_channels'],
+            num_classes = model_cfg['out_channels']).to("cuda")
     
     metrics = SegmentationMetrics()
     loss = SegmentationLoss()

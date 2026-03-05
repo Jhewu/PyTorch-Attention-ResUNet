@@ -45,6 +45,10 @@ class SegmentationMetrics(BaseMetrics):
             pred:   binarized logits from the model  (B, 1, H, W)
             target: binary ground-truth masks  (B, 1, H, W)
         """
+
+        pred_binary = pred_binary.detach().cpu()
+        target = target.detach().cpu()
+
         # Dice
         self._dice(pred_binary, target)
 

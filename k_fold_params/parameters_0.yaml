@@ -1,6 +1,6 @@
 model: 
   # TODO: Update for YOLOSegmantic
-  name: "unet"  # unet, tiny_unet, unext
+  name: "unext"  # unet, tiny_unet, unext
   in_channels: 4
   out_channels: 1
 
