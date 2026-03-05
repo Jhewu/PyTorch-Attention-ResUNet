@@ -1,4 +1,6 @@
 # External
+import gc
+
 import torch
 import pandas as pd
 import torch.nn as nn
@@ -131,8 +133,8 @@ class BaseTrainer:
 
         # ── training hyperparams ──────────────
         self.epochs          =     t_cfg.get("epochs",          10)
-        self.mixed_precision =     t_cfg.get("is_mixed_precision", True)
-        self.is_load_and_train =   t_cfg.get("is_load_and_train", False)
+        self.mixed_precision =     t_cfg.get("use_mixed_precision", True)
+        self.is_load_and_train =   t_cfg.get("use_load_and_train", False)
         self.load_and_train_path = t_cfg.get("load_and_train_path", None)
         self.gradient_clip   =     t_cfg.get("gradient_clip",   1.0)
         self.verbose         =     t_cfg.get("verbose",         True)
@@ -173,12 +175,6 @@ class BaseTrainer:
 
         self._early_stopping_counter = 0
         self._best_es_metric = float("inf") if self.early_stopping_mode == "min" else float("-inf")
-
-        self._autocast_ctx = (
-                torch.amp.autocast(device_type=self.device)
-                if self.mixed_precision
-                else contextlib.nullcontext()
-        )
 
         self._scaler = (
             torch.amp.GradScaler()
@@ -242,12 +238,19 @@ class BaseTrainer:
     def _train_epoch(self, loader: DataLoader) -> float:
         self.set_model_to_train()
         total_loss, n = 0.0, 0
+
+        autocast_ctx = (
+                torch.amp.autocast(device_type=self.device)
+                if self.mixed_precision
+                else contextlib.nullcontext()
+        )
+
         for raw_batch in tqdm(loader):
             batch          = self._move(raw_batch)
             inputs, targets = self._unpack(batch)
 
             self.optimizer.zero_grad()
-            with self._autocast_ctx: # mixed precision  
+            with autocast_ctx: # mixed precision  
                 preds, loss = self.train_step(inputs, targets)
 
             if torch.isnan(loss):
@@ -282,11 +285,18 @@ class BaseTrainer:
         self.model.eval()
         self.metrics.reset()
         total_loss, n = 0.0, 0
+
+        autocast_ctx = (
+                torch.amp.autocast(device_type=self.device)
+                if self.mixed_precision
+                else contextlib.nullcontext()
+        )
+
         for raw_batch in tqdm(loader):
             batch           = self._move(raw_batch)
             inputs, targets = self._unpack(batch)
 
-            with self._autocast_ctx:
+            with autocast_ctx:
                 preds, loss = self.eval_step(inputs, targets)
 
             self.metrics.update(preds, targets)
@@ -371,8 +381,10 @@ class BaseTrainer:
         # plt.show()
 
     # ── public API ────────────────────────────
-    def eval_step(self, inputs, targets):
-        return self.train_step(inputs, targets)
+    def eval_step(self, inputs, targets):    
+        preds = self.model(inputs)
+        loss = self.loss_fn(preds, targets)
+        return preds, loss
 
     def train_step(self, inputs, targets) -> torch.Tensor:
         """Returns loss for one batch. Override for custom forward logic."""
@@ -387,12 +399,6 @@ class BaseTrainer:
             train_loss            = self._train_epoch(train_loader)
             val_loss, val_metrics = self._eval_epoch(val_loader)
 
-            if self.scheduler:
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(es_value)
-                else:
-                    self.scheduler.step()
-
             # ── resolve tracked metric (shared by checkpointing + early stopping) ──
             if self.early_stopping_metric == "val_loss":
                 es_value = val_loss
@@ -400,6 +406,12 @@ class BaseTrainer:
                 es_value = val_metrics.get(self.early_stopping_metric)
                 if es_value is None:
                     raise ValueError(f"Metric '{self.early_stopping_metric}' not found in val_metrics")
+
+            if self.scheduler:
+                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step(es_value)
+                else:
+                    self.scheduler.step()
 
             improved = (
                 es_value < self._best_es_metric - self.early_stopping_delta
@@ -410,7 +422,7 @@ class BaseTrainer:
             # ── checkpoint best model ─────────────
             if improved:
                 self._best_es_metric = es_value
-                self._best_weights   = copy.deepcopy(self.model.state_dict())
+                self._best_weights = {k: v.detach().cpu() for k, v in self.model.state_dict().items()}
                 if self.checkpoint_dir:
                     torch.save(self._best_weights, self.checkpoint_dir + "/best.pth")
 
@@ -440,6 +452,16 @@ class BaseTrainer:
 
             # ── save history to csv ───────────────
             self.save_csv(history = self._history, save_path=f"{self.checkpoint_dir}/history.csv")
+
+            snapshot = torch.cuda.memory_stats()
+            print(f"[Epoch {epoch}] Reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB  "
+            f"Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB  "
+            f"Active allocs: {snapshot['active.all.current']}")
+
+            ### --- TROUBLESHOOTING --- ###
+            # gc.collect()
+            # torch.cuda.empty_cache()
+            ### --- TROUBLESHOOTING --- ###
 
         # ── save last model weights ───────────────
         if self.checkpoint_dir:
