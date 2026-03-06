@@ -72,7 +72,7 @@ if __name__ == "__main__":
     elif MODEL == "attention_unet": 
         model = AttU_Net(
             img_ch=model_cfg['in_channels'], 
-            output_ch=model_cfg['out_channels'].to('cuda'))
+            output_ch=model_cfg['out_channels']).to('cuda')
     else: 
         raise ValueError(f"Model {MODEL} not recognized. Please choose from ['unet', 'tiny_unet', 'unext', 'attention_unet']")
     
