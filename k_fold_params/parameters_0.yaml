@@ -1,6 +1,6 @@
 model: 
   # TODO: Update for YOLOSegmantic
-  name: "unext"  # unet, tiny_unet, unext
+  name: "unext"  # unet, tiny_unet, unext, attention_unet
   in_channels: 4
   out_channels: 1
 
@@ -49,6 +49,6 @@ trainer:
   scheduler:           # optional block
     name: cosine        # see registry
     kwargs:             # passed as-is
-      T_max: 10
+      T_max: 75
   
   device: "cuda"

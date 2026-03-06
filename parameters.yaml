@@ -1,6 +1,6 @@
 model: 
   # TODO: Update for YOLOSegmantic
-  name: "unet"  # unet, tiny_unet, unext
+  name: "attention_unet"  # unet, tiny_unet, unext atttention_unet
   in_channels: 4
   out_channels: 1
 
@@ -15,7 +15,7 @@ dataloader:
   subsample: 1.0
   
   # DataLoader Parameters
-  batch_size: 128
+  batch_size: 16 # UPDATE 128
   num_workers: 10
   use_shuffle: false
   use_persistent_workers: false
@@ -24,7 +24,7 @@ dataloader:
 trainer: 
   training:    
     # General                           
-    epochs: 75
+    epochs: 3 # UPDATE 75
     use_mix_precision: true
 
     is_load_and_train: false

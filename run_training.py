@@ -2,6 +2,7 @@
 from models.unet import UNet
 from models.tiny_unet import TinyUNet
 from models.unext import UNext
+from models.attention_unet import AttU_Net
 
 from trainer import SegmentationTrainer
 from metrics import SegmentationMetrics
@@ -67,6 +68,13 @@ if __name__ == "__main__":
         model = UNext(
             input_channels = model_cfg['in_channels'],
             num_classes = model_cfg['out_channels']).to("cuda")
+    
+    elif MODEL == "attention_unet": 
+        model = AttU_Net(
+            img_ch=model_cfg['in_channels'], 
+            output_ch=model_cfg['out_channels']).to('cuda')
+    else: 
+        raise ValueError(f"Model {MODEL} not recognized. Please choose from ['unet', 'tiny_unet', 'unext', 'attention_unet']")
     
     metrics = SegmentationMetrics()
     loss = SegmentationLoss()
