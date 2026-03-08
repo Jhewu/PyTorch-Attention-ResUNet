@@ -27,7 +27,7 @@ trainer:
     epochs: 3 # UPDATE 75
     use_mix_precision: true
 
-    is_load_and_train: false
+    use_load_and_train: false
     load_and_train_path: null
 
     gradient_clip: 1.0 
