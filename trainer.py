@@ -17,3 +17,13 @@ class SegmentationTrainer(BaseTrainer):
         preds_binary = (pred_sigmoid > 0.5).float()  
         loss = self.loss_fn(preds, targets)
         return preds_binary, loss
+
+    def evaluate(self, split: str = "test") -> tuple[float, dict]:
+        train_loader, val_loader = self.dataloader.get_dataloader(split)
+        loader = val_loader if split == "test" else train_loader
+        loss, metrics = self._eval_epoch(loader)
+        print(f"\n── {split.upper()} RESULTS ──")
+        print(f"  loss: {loss:.4f}")
+        for k, v in metrics.items():
+            print(f"  {k}: {v:.4f}")
+        return loss, metrics

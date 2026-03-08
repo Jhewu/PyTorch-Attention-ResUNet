@@ -35,9 +35,9 @@ class SegmentationMetrics(BaseMetrics):
             reduction="none",
             get_not_nans=True,
         )
-        self._precision_sum = 0.0
-        self._recall_sum = 0.0
-        self._n_batches = 0
+        self._tp_sum = 0.0
+        self._fp_sum = 0.0
+        self._fn_sum = 0.0
 
     def update(self, pred_binary: torch.Tensor, target: torch.Tensor) -> None:
         """
@@ -57,15 +57,14 @@ class SegmentationMetrics(BaseMetrics):
         TP = (pred_binary * target).sum().float()
         FP = (pred_binary * (1 - target)).sum().float()
         FN = ((1 - pred_binary) * target).sum().float()
-        self._precision_sum += (TP / (TP + FP + 1e-6)).item()
-        self._recall_sum += (TP / (TP + FN + 1e-6)).item()
+        self._tp_sum += TP.item()
+        self._fp_sum += FP.item()
+        self._fn_sum += FN.item()
 
         # HD95 — expects one-hot (B, C, H, W) with C=2
         pred_onehot = torch.cat([1 - pred_binary, pred_binary], dim=1)
         mask_onehot = torch.cat([1 - target, target], dim=1)
         self._hd95(pred_onehot, mask_onehot)
-
-        self._n_batches += 1
 
     def compute(self) -> dict:
         dice = self._dice.aggregate().item()
@@ -74,15 +73,14 @@ class SegmentationMetrics(BaseMetrics):
         valid = not_nan_counts.bool()
         hd95 = torch.mean(hd95_vals[valid]).item() if valid.any() else float("nan")
 
-        n = max(self._n_batches, 1)
-        precision = self._precision_sum / n
-        recall = self._recall_sum / n
+        precision = self._tp_sum / (self._tp_sum + self._fp_sum + 1e-6)
+        recall = self._tp_sum / (self._tp_sum + self._fn_sum + 1e-6)
 
         return dict(dice=dice, hd95=hd95, precision=precision, recall=recall)
 
     def reset(self) -> None:
         self._dice.reset()
         self._hd95.reset()
-        self._precision_sum = 0.0
-        self._recall_sum = 0.0
-        self._n_batches = 0
+        self._tp_sum = 0.0
+        self._fp_sum = 0.0
+        self._fn_sum = 0.0

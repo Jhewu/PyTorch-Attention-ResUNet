@@ -1,8 +1,12 @@
-runs/*
+# Permanent
 data/*
-__pycache__/
 archive/
-old_runs/
-.vscode/
 checkpoints/*
 3_fold_dataset/
+
+# Temporary
+__pycache__/
+.vscode/
+old_runs/
+split_out_*
+commands.txt
