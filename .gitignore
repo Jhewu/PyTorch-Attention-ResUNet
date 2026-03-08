@@ -9,3 +9,4 @@ __pycache__/
 .vscode/
 old_runs/
 split_out_*
+commands.txt
